@@ -40,41 +40,59 @@ void Tracer::Render(const Scene& scene,
 glm::vec3 Tracer::TraceRay(const Ray& ray,
                            size_t bounces,
                            HitRecord& record) const {
-  std::cerr.precision(10);
   glm::vec3 res = GetBackgroundColor(ray.GetDirection());
-  if (bounces > max_bounces_) return res;
-  for(const auto& object : tracing_components_) {
+  if (bounces > max_bounces_)
+    return res;
+  TracingComponent *hit = nullptr;
+  for (const auto &object : tracing_components_) {
     auto transf = object->GetNodePtr()->GetTransform().GetLocalToWorldMatrix();
     auto ray_local = ray;
     ray_local.ApplyTransform(glm::inverse(transf));
     if (object->GetHittable().Intersect(ray_local, 0, record)) {
-      auto material = object->GetNodePtr()->GetComponentPtr<MaterialComponent>()->GetMaterial();
-
-      record.normal = glm::normalize(glm::vec3(glm::inverse(glm::transpose(transf))*glm::vec4(record.normal, 0.0f)));
-
-      auto hit_pos = ray.At(record.time);
-
-      res = {0, 0, 0};
-      for(const auto& x : light_components_) {
-        glm::vec3 dir_to_light;
-        glm::vec3 intensity;
-        float dist_to_light;
-        Illuminator::GetIllumination(*x, hit_pos, dir_to_light, intensity, dist_to_light);
-        if (x->GetLightPtr()->GetType() == LightType::Ambient) {
-          res += intensity * material.GetAmbientColor();
-        }
-        else {
-          glm::vec3 I_diffuse =
-              std::max(0.0f, glm::dot(dir_to_light, record.normal)) * intensity;
-          res += I_diffuse * material.GetDiffuseColor();
-
-          auto eye = glm::normalize(ray.GetDirection());
-          auto R = glm::reflect(eye, record.normal);
-          glm::vec3 I_specular = (float)pow(std::max(0.0f, glm::dot(dir_to_light, R)), material.GetShininess()) * intensity;
-          res += I_specular * material.GetSpecularColor();
-        }
-      }
+      record.normal = glm::normalize(glm::vec3(glm::inverse(glm::transpose(transf)) * glm::vec4(record.normal, 0.0f)));
+      hit = object;
     }
+  }
+  if (!hit)
+    return res;
+  const auto &object = hit;
+  auto hit_pos = ray.At(record.time);
+  auto material =
+      object->GetNodePtr()->GetComponentPtr<MaterialComponent>()->GetMaterial();
+  res = {0, 0, 0};
+  auto eye = glm::normalize(ray.GetDirection());
+  auto R = glm::reflect(eye, record.normal);
+  constexpr float eps = 1e-3;
+  for (const auto &x : light_components_) {
+    glm::vec3 dir_to_light;
+    glm::vec3 intensity;
+    float dist_to_light;
+    Illuminator::GetIllumination(*x, hit_pos, dir_to_light, intensity,
+                                 dist_to_light);
+    if (x->GetLightPtr()->GetType() == LightType::Ambient) {
+      res += intensity * material.GetAmbientColor();
+    } else {
+      if (shadows_enabled_) {
+        HitRecord shadow_record;
+        Tracer::TraceRay(Ray(hit_pos + dir_to_light * eps, dir_to_light), max_bounces_, shadow_record);
+        if (shadow_record.time < dist_to_light)
+          continue;
+      }
+      glm::vec3 I_diffuse =
+          std::max(0.0f, glm::dot(dir_to_light, record.normal)) * intensity;
+      res += I_diffuse * material.GetDiffuseColor();
+
+      glm::vec3 I_specular =
+          (float)pow(std::max(0.0f, glm::dot(dir_to_light, R)),
+                     material.GetShininess()) *
+          intensity;
+      res += I_specular * material.GetSpecularColor();
+    }
+  }
+  if (glm::length(material.GetSpecularColor()) > eps && bounces + 1 < max_bounces_)
+  {
+    HitRecord new_record;
+    res += Tracer::TraceRay(Ray(hit_pos + R * eps, R), bounces + 1, new_record) * material.GetSpecularColor();
   }
   return res;
 }
